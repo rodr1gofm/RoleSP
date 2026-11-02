@@ -8,6 +8,7 @@ const { Pool, types } = require('pg');
 types.setTypeParser(20, v => parseInt(v, 10)); // ids bigint chegam como número, não texto
 const { CATEGORIAS, validarLugar, validarRole } = require('./lib/validar');
 const { quandoRecorrente, quandoUnico } = require('./lib/quando');
+const { prepararImportacao, gravarImportacao } = require('./lib/importar');
 
 const { DATABASE_URL, ADMIN_PASSWORD = '', ALLOWED_ORIGIN = '', PORT = 3000 } = process.env;
 if (!DATABASE_URL) { console.error('Defina DATABASE_URL.'); process.exit(1); }
@@ -21,7 +22,8 @@ const app = express();
 app.set('trust proxy', 1); // Render fica atrás de um proxy: necessário para o limite por IP funcionar
 app.use(helmet());
 app.use(cors({ origin: ALLOWED_ORIGIN ? ALLOWED_ORIGIN.split(',').map(s => s.trim()) : false, methods: ['GET', 'POST', 'PUT', 'PATCH'] }));
-app.use(express.json({ limit: '20kb' }));
+const jsonPadrao = express.json({ limit: '20kb' });
+app.use((req, res, next) => (req.path === '/api/admin/importar' ? next() : jsonPadrao(req, res, next))); // a importação tem limite maior, aplicado depois da senha
 app.use('/api', rateLimit({ windowMs: 15 * 60 * 1000, limit: 600, standardHeaders: true, legacyHeaders: false }));
 
 /* ---------- utilidades ---------- */
@@ -192,6 +194,20 @@ app.patch('/api/admin/roles/:id/status', wrap(async (req, res) => {
   if (!['rascunho', 'publicado', 'arquivado'].includes(s)) return bad(res, 'status inválido');
   const { rowCount } = await pool.query('UPDATE roles SET status=$1 WHERE id=$2', [s, id]);
   rowCount ? res.json({ id, status: s }) : res.status(404).json({ erro: 'rolê não encontrado' });
+}));
+
+// Importação de CSV (tudo ou nada). Corpo: { csv: "texto", simular: bool, publicar: bool }
+app.post('/api/admin/importar', express.json({ limit: '300kb' }), wrap(async (req, res) => {
+  const { csv, simular, publicar } = req.body || {};
+  if (typeof csv !== 'string' || !csv.trim()) return bad(res, 'envie o texto do CSV no campo csv');
+  const p = prepararImportacao(csv);
+  if (p.erros.length) {
+    const erros = p.erros.slice(0, 40);
+    if (p.erros.length > 40) erros.push(`... e mais ${p.erros.length - 40} erro(s)`);
+    return res.status(400).json({ erros });
+  }
+  const r = await gravarImportacao(pool, p.itens, { publicar: publicar === true, simular: simular === true });
+  res.json({ simulado: simular === true, linhas: p.itens.length, ...r });
 }));
 
 /* ---------- erros ---------- */
