@@ -21,7 +21,7 @@ pool.on('error', e => console.error('erro no pool:', e.message));
 const app = express();
 app.set('trust proxy', 1); // Render fica atrás de um proxy: necessário para o limite por IP funcionar
 app.use(helmet());
-app.use(cors({ origin: ALLOWED_ORIGIN ? ALLOWED_ORIGIN.split(',').map(s => s.trim()) : false, methods: ['GET', 'POST', 'PUT', 'PATCH'] }));
+app.use(cors({ origin: ALLOWED_ORIGIN ? ALLOWED_ORIGIN.split(',').map(s => s.trim()) : false, methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] }));
 const jsonPadrao = express.json({ limit: '20kb' });
 app.use((req, res, next) => (req.path === '/api/admin/importar' ? next() : jsonPadrao(req, res, next))); // a importação tem limite maior, aplicado depois da senha
 app.use('/api', rateLimit({ windowMs: 15 * 60 * 1000, limit: 600, standardHeaders: true, legacyHeaders: false }));
@@ -38,9 +38,9 @@ const paraApi = (r, admin = false) => ({
   preco_centavos: r.preco_centavos, gratuito: r.preco_centavos === 0,
   tipo: r.tipo, agenda: r.agenda, inicio: r.inicio, fim: r.fim,
   quando: r.tipo === 'recorrente' ? quandoRecorrente(r.agenda) : quandoUnico(r.inicio, r.fim),
-  verificado_em: r.verificado_em,
+  fonte_url: r.fonte_url, verificado_em: r.verificado_em, // fonte_url é público: alimenta o botão "Mais informações"
   lugar: { id: r.lugar_id, nome: r.lugar_nome, endereco: r.endereco, bairro: r.bairro, lat: Number(r.lat), lng: Number(r.lng), metro: r.metro, tags: r.lugar_tags },
-  ...(admin ? { status: r.status, fonte_url: r.fonte_url, lugar_ativo: r.lugar_ativo } : {}),
+  ...(admin ? { status: r.status, lugar_ativo: r.lugar_ativo } : {}),
 });
 
 const DIAS = { dom: 0, seg: 1, ter: 2, qua: 3, qui: 4, sex: 5, sab: 6 };
@@ -171,6 +171,17 @@ app.put('/api/admin/lugares/:id', wrap(async (req, res) => {
     [v.nome, v.endereco, v.bairro, v.lat, v.lng, v.metro, v.tags, v.fonte_url, v.ativo, id]);
   rows.length ? res.json(rows[0]) : res.status(404).json({ erro: 'lugar não encontrado' });
 }));
+// Exclusão definitiva. Lugar com rolês é recusado pelo banco (ON DELETE RESTRICT), inclusive rolês arquivados.
+app.delete('/api/admin/lugares/:id', wrap(async (req, res) => {
+  const id = idDe(req); if (!id) return bad(res, 'id inválido');
+  try {
+    const { rowCount } = await pool.query('DELETE FROM lugares WHERE id=$1', [id]);
+    rowCount ? res.json({ id, excluido: true }) : res.status(404).json({ erro: 'lugar não encontrado' });
+  } catch (e) {
+    if (e.code === '23503') return res.status(409).json({ erro: 'este lugar ainda tem rolês. Exclua os rolês dele primeiro.' });
+    throw e;
+  }
+}));
 
 const COLS = 'lugar_id, titulo, descricao, categoria, tags, preco_centavos, tipo, agenda, inicio, fim, status, fonte_url, verificado_em';
 const vals = v => [v.lugar_id, v.titulo, v.descricao, v.categoria, v.tags, v.preco_centavos, v.tipo, v.agenda && JSON.stringify(v.agenda), v.inicio, v.fim, v.status, v.fonte_url, v.verificado_em];
@@ -194,6 +205,26 @@ app.patch('/api/admin/roles/:id/status', wrap(async (req, res) => {
   if (!['rascunho', 'publicado', 'arquivado'].includes(s)) return bad(res, 'status inválido');
   const { rowCount } = await pool.query('UPDATE roles SET status=$1 WHERE id=$2', [s, id]);
   rowCount ? res.json({ id, status: s }) : res.status(404).json({ erro: 'rolê não encontrado' });
+}));
+// Exclusão definitiva (diferente de arquivar, não tem volta).
+app.delete('/api/admin/roles/:id', wrap(async (req, res) => {
+  const id = idDe(req); if (!id) return bad(res, 'id inválido');
+  const { rowCount } = await pool.query('DELETE FROM roles WHERE id=$1', [id]);
+  rowCount ? res.json({ id, excluido: true }) : res.status(404).json({ erro: 'rolê não encontrado' });
+}));
+
+// Apaga TODOS os rolês e lugares, em qualquer status. Exige a frase de confirmação no corpo.
+const FRASE_ZERAR = 'APAGAR TUDO';
+app.post('/api/admin/zerar', wrap(async (req, res) => {
+  if (!req.body || req.body.confirmacao !== FRASE_ZERAR) return bad(res, `confirmação ausente: envie { "confirmacao": "${FRASE_ZERAR}" }`);
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    const roles = (await c.query('DELETE FROM roles')).rowCount;
+    const lugares = (await c.query('DELETE FROM lugares')).rowCount;
+    await c.query('COMMIT');
+    res.json({ roles, lugares });
+  } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
 }));
 
 // Importação de CSV (tudo ou nada). Corpo: { csv: "texto", simular: bool, publicar: bool }
