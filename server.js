@@ -206,11 +206,12 @@ app.patch('/api/admin/roles/:id/status', wrap(async (req, res) => {
   const { rowCount } = await pool.query('UPDATE roles SET status=$1 WHERE id=$2', [s, id]);
   rowCount ? res.json({ id, status: s }) : res.status(404).json({ erro: 'rolê não encontrado' });
 }));
-// Exclusão definitiva (diferente de arquivar, não tem volta).
-app.delete('/api/admin/roles/:id', wrap(async (req, res) => {
-  const id = idDe(req); if (!id) return bad(res, 'id inválido');
-  const { rowCount } = await pool.query('DELETE FROM roles WHERE id=$1', [id]);
-  rowCount ? res.json({ id, excluido: true }) : res.status(404).json({ erro: 'rolê não encontrado' });
+// Exclusão definitiva dos rolês selecionados (diferente de arquivar, não tem volta). Corpo: { ids: [1, 2, 3] }
+app.post('/api/admin/roles/excluir', wrap(async (req, res) => {
+  const ids = req.body && req.body.ids;
+  if (!Array.isArray(ids) || !ids.length || ids.length > 1000 || !ids.every(n => Number.isInteger(n) && n > 0)) return bad(res, 'envie ids: lista de 1 a 1000 ids de rolês');
+  const { rowCount } = await pool.query('DELETE FROM roles WHERE id = ANY($1::bigint[])', [ids]);
+  res.json({ excluidos: rowCount });
 }));
 
 // Apaga TODOS os rolês e lugares, em qualquer status. Exige a frase de confirmação no corpo.
